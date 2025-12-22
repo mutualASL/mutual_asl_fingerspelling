@@ -29,7 +29,7 @@ CLEAR_TIMEOUT = 6.0
 DOUBLE_LETTER_TIME = 0.7     # was 1.0
 DOUBLE_LETTER_STABILITY = 0.92 # was 0.95
 HF_MODEL = "meta-llama/Meta-Llama-3-8B-Instruct"
-HF_TOKEN = "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"
+HF_TOKEN = ""
 HF_TIMEOUT = 30  # seconds for HF API call
 
 # ------------------- Audio feedback -------------------
