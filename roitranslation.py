@@ -19,17 +19,17 @@ from PIL import Image, ImageTk
 
 # ------------------- Configuration -------------------
 IMG_SIZE = 200
-HISTORY_LENGTH = 25
-CONFIDENCE_THRESHOLD = 0.65
-FRAMES_THRESHOLD = 5
-TOLERANCE_THRESHOLD = 0.55
-WORD_TIMEOUT = 0.2
+HISTORY_LENGTH = 16          # was 25
+FRAMES_THRESHOLD = 4         # was 5
+CONFIDENCE_THRESHOLD = 0.70  # was 0.65
+TOLERANCE_THRESHOLD = 0.50
+WORD_TIMEOUT = 0.35
 SENTENCE_TIMEOUT = 5.0
 CLEAR_TIMEOUT = 6.0
-DOUBLE_LETTER_TIME = 1.0
-DOUBLE_LETTER_STABILITY = 0.95
+DOUBLE_LETTER_TIME = 0.7     # was 1.0
+DOUBLE_LETTER_STABILITY = 0.92 # was 0.95
 HF_MODEL = "meta-llama/Meta-Llama-3-8B-Instruct"
-HF_TOKEN = "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"
+HF_TOKEN = "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"
 HF_TIMEOUT = 30  # seconds for HF API call
 
 # ------------------- Audio feedback -------------------
@@ -78,14 +78,16 @@ def query_hf_llm(letters: str) -> str:
         f"Input letters: {letters}\n\n"
         "Interpret the letters as English text and output a single concise, "
         "natural English sentence. If needed, split into multiple words. "
-        "Return ONLY the sentence."
+        "Return ONLY the sentence. You do not need to explain a single character; output null"
+        "Do not explain a sentence, always give a corrected version of the input"
+        "If ever a single character is inputted, return that exact letter with nothing added to it"
     )
 
     payload = {
         "model": "meta-llama/Meta-Llama-3-8B-Instruct:novita",
         "messages": [{"role": "user", "content": prompt}],
         "max_tokens": 128,
-        "temperature": 0.2
+        "temperature": 0.5
     }
 
     try:
