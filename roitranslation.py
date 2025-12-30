@@ -19,18 +19,18 @@ from PIL import Image, ImageTk
 
 # ------------------- Configuration -------------------
 IMG_SIZE = 200
-HISTORY_LENGTH = 16          # was 25
-FRAMES_THRESHOLD = 4         # was 5
-CONFIDENCE_THRESHOLD = 0.70  # was 0.65
+HISTORY_LENGTH = 16
+FRAMES_THRESHOLD = 4
+CONFIDENCE_THRESHOLD = 0.70
 TOLERANCE_THRESHOLD = 0.50
 WORD_TIMEOUT = 0.35
 SENTENCE_TIMEOUT = 5.0
 CLEAR_TIMEOUT = 6.0
-DOUBLE_LETTER_TIME = 0.7     # was 1.0
-DOUBLE_LETTER_STABILITY = 0.92 # was 0.95
+DOUBLE_LETTER_TIME = 0.7
+DOUBLE_LETTER_STABILITY = 0.92
 HF_MODEL = "meta-llama/Meta-Llama-3-8B-Instruct"
-HF_TOKEN = "null"
-HF_TIMEOUT = 30  # seconds for HF API call
+HF_TOKEN = "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"
+HF_TIMEOUT = 30
 
 # ------------------- Audio feedback -------------------
 pygame.mixer.init()
@@ -61,6 +61,126 @@ except Exception as e:
     print(f"Error loading model or class names: {e}")
     raise
 
+# ------------------- Startup Animation -------------------
+def play_startup_animation(root, on_finish, video_filename="Startup copy.mp4", fade_frames=15):
+    """Fixed startup animation - plays in main UI window, centered, not stretched"""
+    base_dir = os.path.dirname(os.path.abspath(__file__))
+    video_path = os.path.join(base_dir, video_filename)
+
+    # Check if video file exists
+    if not os.path.exists(video_path):
+        print(f"Warning: Video file not found at {video_path}")
+        print("Skipping startup animation...")
+        on_finish()
+        return
+
+    cap = cv2.VideoCapture(video_path)
+    if not cap.isOpened():
+        print(f"Warning: Could not open video file at {video_path}")
+        print("Skipping startup animation...")
+        on_finish()
+        return
+
+    # Get video properties
+    fps = cap.get(cv2.CAP_PROP_FPS)
+    if fps == 0 or fps > 120:  # fallback if fps detection fails
+        fps = 60
+    frame_delay = int(1000 / fps)  # Convert to milliseconds
+
+    # Get original video dimensions
+    orig_width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
+    orig_height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
+
+    print(f"Video: {orig_width}x{orig_height} @ {fps} fps")
+
+    # Make sure root window is visible
+    root.deiconify()
+    root.update()
+
+    # Get window dimensions (1200x700 from ASLTranslationUI)
+    window_w = 1200
+    window_h = 700
+
+    # Calculate scaled dimensions to fit in window while maintaining aspect ratio
+    aspect_ratio = orig_width / orig_height
+    if window_w / window_h > aspect_ratio:
+        # Window is wider than video - fit to height
+        display_h = window_h
+        display_w = int(display_h * aspect_ratio)
+    else:
+        # Window is taller than video - fit to width
+        display_w = window_w
+        display_h = int(display_w / aspect_ratio)
+
+    # Create canvas that covers the entire window
+    canvas = tk.Canvas(root, width=window_w, height=window_h, highlightthickness=0, bg='white')
+    canvas.place(x=0, y=0, relwidth=1, relheight=1)
+    img_container = canvas.create_image(window_w//2, window_h//2, anchor=tk.CENTER)
+
+    # Read all frames and resize them
+    frames = []
+    print("Loading startup animation frames...")
+    while True:
+        ret, frame = cap.read()
+        if not ret:
+            break
+        # Resize to fit window while maintaining aspect ratio
+        frame = cv2.resize(frame, (display_w, display_h), interpolation=cv2.INTER_AREA)
+        frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+        frames.append(Image.fromarray(frame))
+    cap.release()
+
+    if not frames:
+        print("Warning: No frames loaded from video")
+        canvas.destroy()
+        on_finish()
+        return
+
+    print(f"Loaded {len(frames)} frames @ {fps} fps. Starting animation...")
+
+    # Convert to PhotoImage and store references
+    photo_frames = []
+    for f in frames:
+        photo_frames.append(ImageTk.PhotoImage(f))
+
+    # Keep references to prevent garbage collection
+    canvas._photo_refs = photo_frames
+    canvas._pil_frames = frames
+
+    def show_frame(i=0):
+        if i < len(photo_frames):
+            canvas.itemconfig(img_container, image=photo_frames[i])
+            # Use video's actual frame rate
+            root.after(frame_delay, lambda: show_frame(i + 1))
+        else:
+            print("Animation complete. Starting fade out...")
+            fade_out(0)
+
+    def fade_out(step):
+        if step >= fade_frames:
+            print("Fade complete. Starting main app...")
+            # Cleanup with delay to prevent warnings
+            def cleanup():
+                canvas.destroy()
+                canvas._photo_refs = None
+                canvas._pil_frames = None
+                on_finish()
+            root.after(50, cleanup)
+            return
+
+        alpha = step / fade_frames
+        last_frame = np.array(frames[-1]).astype(np.float32)
+        white = np.ones_like(last_frame) * 255
+        blended = (last_frame * (1 - alpha) + white * alpha).astype(np.uint8)
+        img = ImageTk.PhotoImage(Image.fromarray(blended))
+        canvas.itemconfig(img_container, image=img)
+        canvas._fade_ref = img
+        root.after(25, lambda: fade_out(step + 1))
+
+    # Start animation immediately
+    show_frame(0)
+
+
 # ------------------- Hugging Face LLM query -------------------
 def query_hf_llm(letters: str) -> str:
     if not letters:
@@ -78,9 +198,8 @@ def query_hf_llm(letters: str) -> str:
         f"Input letters: {letters}\n\n"
         "Interpret the letters as English text and output a single concise, "
         "natural English sentence. If needed, split into multiple words. "
-        "Return ONLY the sentence. You do not need to explain a single character; output null"
-        "Do not explain a sentence, always give a corrected version of the input"
-        "If ever a single character is inputted, return that exact letter with nothing added to it"
+        "Return ONLY the sentence. Do not explain anything. "
+        "If ever a single character is inputted, return that exact letter only."
     )
 
     payload = {
@@ -101,7 +220,7 @@ def query_hf_llm(letters: str) -> str:
         print(f"HF API request failed: {e}")
         return ""
 
-# ------------------- Hand Landmarks and Processing Functions ---
+# ------------------- Hand landmarks processing -------------------
 def get_hand_landmarks(image):
     image_rgb = cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
     results = hands.process(image_rgb)
@@ -133,11 +252,9 @@ def calculate_slope_and_adjust(hand_landmarks, image_shape, target_size=(200, 20
     slope_info = check_wrist_slope(hand_landmarks, image_shape)
     slope = slope_info[0] if slope_info else None
 
-    # Vertical / horizontal mode
     is_vertical = x_range_min <= wrist[0] <= x_range_max
     is_horizontal = (wrist[0] < x_range_min or wrist[0] > x_range_max) or (slope is not None and -0.5 <= slope <= 0.5)
 
-    # Apply transformations based on mode
     if is_vertical and not is_horizontal:
         fixed_wrist = (target_w // 2, target_h - 50)
         mcp_center = ((index_mcp[0] + middle_mcp[0] + ring_mcp[0] + pinky_mcp[0]) // 4,
@@ -158,7 +275,6 @@ def calculate_slope_and_adjust(hand_landmarks, image_shape, target_size=(200, 20
     else:
         transformed_landmarks = landmarks
 
-    # Scale to target image
     x_coords = [pt[0] for pt in transformed_landmarks]
     y_coords = [pt[1] for pt in transformed_landmarks]
     x_min, x_max, y_min, y_max = min(x_coords), max(x_coords), min(y_coords), max(y_coords)
@@ -168,7 +284,6 @@ def calculate_slope_and_adjust(hand_landmarks, image_shape, target_size=(200, 20
     offset_x, offset_y = (target_w - ((x_max - x_min) * scale)) // 2, (target_h - ((y_max - y_min) * scale)) // 2
     final_landmarks = [(int((x - x_min) * scale + offset_x), int((y - y_min) * scale + offset_y)) for x, y in transformed_landmarks]
 
-    # Draw landmarks
     landmark_image = np.ones((target_h, target_w, 3), dtype=np.uint8) * 255
     for start_idx, end_idx in mp_hands.HAND_CONNECTIONS:
         if start_idx < len(final_landmarks) and end_idx < len(final_landmarks):
@@ -238,53 +353,47 @@ class ASLTranslationUI:
         self.root.geometry("1200x700")
         self.root.configure(bg='white')
 
-        # Top white box (70%)
         self.top_frame = tk.Frame(root, bg='white')
         self.top_frame.pack(fill=tk.BOTH, expand=True)
 
-        # Last word display (BIG TEXT)
         self.word_label = tk.Label(
             self.top_frame,
             text="",
             bg='white',
-            fg='black',  # ✅ FIX
+            fg='black',
             font=tkfont.Font(family="Helvetica", size=48, weight="bold"),
             wraplength=750
         )
         self.word_label.pack(pady=(100, 20))
 
-        # Last letter display
         self.letter_label = tk.Label(
             self.top_frame,
             text="Last Letter: ",
             bg='white',
-            fg='black',  # ✅ FIX
+            fg='black',
             font=tkfont.Font(family="Helvetica", size=24)
         )
         self.letter_label.pack(pady=10)
 
-        # Raw letters display
         self.raw_letters_label = tk.Label(
             self.top_frame,
             text="Raw: ",
             bg='white',
-            fg='black',  # ✅ FIX
+            fg='black',
             font=tkfont.Font(family="Helvetica", size=16),
             wraplength=750
         )
         self.raw_letters_label.pack(pady=10)
 
-        # Bottom grey box (30%)
         self.bottom_frame = tk.Frame(root, bg='#808080', height=180)
         self.bottom_frame.pack(fill=tk.BOTH, expand=True)
         self.bottom_frame.pack_propagate(False)
 
-        # Full sentence display
         self.sentence_label = tk.Label(
             self.bottom_frame,
             text="",
             bg='#808080',
-            fg='white',  # keep white on grey
+            fg='white',
             font=tkfont.Font(family="Helvetica", size=20),
             wraplength=750,
             justify=tk.LEFT
@@ -306,138 +415,153 @@ class ASLTranslationUI:
 
 # ------------------- Main loop -------------------
 def main():
+    global cap
+    cap = None
     global current_letter, sentence_text, all_raw_letters, current_letters
     global is_recording, last_confident_time, last_letter_time, prediction_history
 
-    # Initialize UI
     root = tk.Tk()
     ui = ASLTranslationUI(root)
-
-    cap = cv2.VideoCapture(0)
-    print("Live ASL Translation (HF API) - Close window to quit")
+    root.withdraw()
+    root.update_idletasks()
+    root.update()
 
     last_word = ""
     current_landmark_img = None
 
-    def update_frame():
-        global current_letter, sentence_text, all_raw_letters, current_letters
-        global is_recording, last_confident_time, last_letter_time, prediction_history
+    def start_main_app():
+        # Show UI after animation
+        root.deiconify()
+        root.attributes('-topmost', False)
 
-        nonlocal last_word, current_landmark_img
+        global cap
+        cap = cv2.VideoCapture(0)
+        print("Live ASL Translation (HF API) - Close window to quit")
 
-        if not ui.running:
-            cap.release()
-            cv2.destroyAllWindows()
-            pygame.mixer.quit()
-            return
+        def update_frame():
+            global current_letter, sentence_text, all_raw_letters, current_letters
+            global is_recording, last_confident_time, last_letter_time, prediction_history
 
-        ret, frame = cap.read()
-        if not ret:
-            root.after(10, update_frame)
-            return
+            nonlocal last_word, current_landmark_img
 
-        frame = cv2.flip(frame, 1)
-        hand_landmarks = get_hand_landmarks(frame)
-        landmark_image = calculate_slope_and_adjust(hand_landmarks, frame.shape) if hand_landmarks else None
-        current_landmark_img = landmark_image
-        current_time = time.time()
+            if not ui.running:
+                if cap is not None:
+                    cap.release()
+                cv2.destroyAllWindows()
+                pygame.mixer.quit()
+                return
 
-        if landmark_image is not None:
-            processed_image = preprocess_image(landmark_image)
-            if processed_image is not None:
-                prediction = model.predict(processed_image, verbose=0)
-                predicted_index = int(np.argmax(prediction))
-                confidence = float(np.max(prediction))
-                if confidence > CONFIDENCE_THRESHOLD:
-                    current_prediction = class_names[predicted_index] if predicted_index < len(class_names) else ""
-                    prediction_history.append(current_prediction)
-                    last_confident_time = current_time
+            ret, frame = cap.read()
+            if not ret:
+                root.after(10, update_frame)
+                return
+
+            frame = cv2.flip(frame, 1)
+            hand_landmarks = get_hand_landmarks(frame)
+            landmark_image = calculate_slope_and_adjust(hand_landmarks, frame.shape) if hand_landmarks else None
+            current_landmark_img = landmark_image
+            current_time = time.time()
+
+            if landmark_image is not None:
+                processed_image = preprocess_image(landmark_image)
+                if processed_image is not None:
+                    prediction = model.predict(processed_image, verbose=0)
+                    predicted_index = int(np.argmax(prediction))
+                    confidence = float(np.max(prediction))
+                    if confidence > CONFIDENCE_THRESHOLD:
+                        current_prediction = class_names[predicted_index] if predicted_index < len(class_names) else ""
+                        prediction_history.append(current_prediction)
+                        last_confident_time = current_time
+                    else:
+                        current_prediction = ""
                 else:
                     current_prediction = ""
             else:
                 current_prediction = ""
-        else:
-            current_prediction = ""
-            prediction_history.clear()
+                prediction_history.clear()
 
-        process_letter(prediction_history, current_time)
+            process_letter(prediction_history, current_time)
 
-        # Word / sentence timeouts
-        if last_confident_time and (current_time - last_confident_time > WORD_TIMEOUT):
-            if is_recording:
-                is_recording = False
+            if last_confident_time and (current_time - last_confident_time > WORD_TIMEOUT):
+                if is_recording:
+                    is_recording = False
+                    combined = ''.join(all_raw_letters)
+                    if combined:
+                        print(f"Word finished: {combined} -> querying HF LLM...")
+                        def query_thread():
+                            global sentence_text
+                            nonlocal last_word
+                            sentence = query_hf_llm(combined)
+                            if sentence:
+                                sentence_text = sentence
+                                words = sentence.split()
+                                last_word = words[-1] if words else ""
+                                print("HF LLM returned:", sentence_text)
+                        threading.Thread(target=query_thread, daemon=True).start()
+                        all_raw_letters = []
+                        current_letters = []
+                    last_letter_time = None
+
+            if last_confident_time and (current_time - last_confident_time > SENTENCE_TIMEOUT):
                 combined = ''.join(all_raw_letters)
                 if combined:
-                    print(f"Word finished: {combined} -> querying HF LLM...")
-                    # Run LLM query in thread to avoid blocking UI
+                    print(f"Sentence timeout: {combined} -> querying HF LLM for full sentence...")
                     def query_thread():
                         global sentence_text
                         nonlocal last_word
                         sentence = query_hf_llm(combined)
                         if sentence:
                             sentence_text = sentence
-                            # Extract last word
                             words = sentence.split()
                             last_word = words[-1] if words else ""
-                            print("HF LLM returned:", sentence_text)
+                            print("HF LLM returned (sentence timeout):", sentence_text)
                     threading.Thread(target=query_thread, daemon=True).start()
                     all_raw_letters = []
                     current_letters = []
-                last_letter_time = None
 
-        if last_confident_time and (current_time - last_confident_time > SENTENCE_TIMEOUT):
-            combined = ''.join(all_raw_letters)
-            if combined:
-                print(f"Sentence timeout: {combined} -> querying HF LLM for full sentence...")
-                def query_thread():
-                    global sentence_text
-                    nonlocal last_word
-                    sentence = query_hf_llm(combined)
-                    if sentence:
-                        sentence_text = sentence
-                        words = sentence.split()
-                        last_word = words[-1] if words else ""
-                        print("HF LLM returned (sentence timeout):", sentence_text)
-                threading.Thread(target=query_thread, daemon=True).start()
+            if last_confident_time and (current_time - last_confident_time > CLEAR_TIMEOUT):
                 all_raw_letters = []
                 current_letters = []
+                sentence_text = ""
+                current_letter = ""
+                last_word = ""
+                is_recording = False
+                last_confident_time = None
+                prediction_history.clear()
+                print("Cleared all state due to inactivity")
 
-        if last_confident_time and (current_time - last_confident_time > CLEAR_TIMEOUT):
-            all_raw_letters = []
-            current_letters = []
-            sentence_text = ""
-            current_letter = ""
-            last_word = ""
-            is_recording = False
-            last_confident_time = None
-            prediction_history.clear()
-            print("Cleared all state due to inactivity")
+            raw_display = ''.join(all_raw_letters)
+            ui.update_display(last_word, current_letter, sentence_text, raw_display)
 
-        # Update UI with live data
-        raw_display = ''.join(all_raw_letters)
-        ui.update_display(last_word, current_letter, sentence_text, raw_display)
+            if current_landmark_img is not None:
+                cv2.imshow('Landmark Image (Rotation Adjusted)',
+                          cv2.resize(current_landmark_img, (500, 500), interpolation=cv2.INTER_NEAREST))
+            else:
+                blank = np.ones((500, 500, 3), dtype=np.uint8) * 255
+                cv2.imshow('Landmark Image (Rotation Adjusted)', blank)
 
-        # Display landmark image in separate OpenCV window
-        if current_landmark_img is not None:
-            cv2.imshow('Landmark Image (Rotation Adjusted)',
-                      cv2.resize(current_landmark_img, (500, 500), interpolation=cv2.INTER_NEAREST))
-        else:
-            blank = np.ones((500, 500, 3), dtype=np.uint8) * 255
-            cv2.imshow('Landmark Image (Rotation Adjusted)', blank)
+            if cv2.waitKey(1) & 0xFF == ord('q'):
+                ui.on_closing()
+                return
 
-        if cv2.waitKey(1) & 0xFF == ord('q'):
-            ui.on_closing()
-            return
+            root.after(10, update_frame)
 
-        root.after(10, update_frame)
+        update_frame()
 
-    # Start the update loop
-    update_frame()
+    play_startup_animation(
+        root,
+        on_finish=start_main_app,
+        video_filename="Startup copy.mp4"
+    )
+
     root.mainloop()
 
-    cap.release()
+    if cap is not None:
+        cap.release()
+
     cv2.destroyAllWindows()
     pygame.mixer.quit()
+
 
 if __name__ == "__main__":
     main()
