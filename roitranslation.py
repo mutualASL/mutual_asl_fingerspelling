@@ -28,8 +28,6 @@ SENTENCE_TIMEOUT = 5.0
 CLEAR_TIMEOUT = 6.0
 DOUBLE_LETTER_TIME = 0.7
 DOUBLE_LETTER_STABILITY = 0.92
-HF_MODEL = "meta-llama/Meta-Llama-3-8B-Instruct"
-HF_TOKEN = "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"
 HF_TIMEOUT = 30
 
 # ------------------- Audio feedback -------------------
@@ -181,45 +179,27 @@ def play_startup_animation(root, on_finish, video_filename="Startup copy.mp4", f
     show_frame(0)
 
 
-# ------------------- Hugging Face LLM query -------------------
+# ------------------- Hugging Face relay server query -------------------
+# This replaces the local HF token usage with your Railway server
+HF_RELAY_URL = "https://hfrelay-production.up.railway.app/translate"  # <--- replace with your deployed server URL
+
 def query_hf_llm(letters: str) -> str:
     if not letters:
         return ""
 
-    API_URL = "https://router.huggingface.co/v1/chat/completions"
-    headers = {
-        "Authorization": f"Bearer {HF_TOKEN}",
-        "Content-Type": "application/json"
-    }
-
-    prompt = (
-        "You are a helpful assistant that converts ASL finger-spelled letters "
-        "into a natural English sentence.\n\n"
-        f"Input letters: {letters}\n\n"
-        "Interpret the letters as English text and output a single concise, "
-        "natural English sentence. If needed, split into multiple words. "
-        "Return ONLY the sentence. Do not explain anything. "
-        "If ever a single character is inputted, return that exact letter only."
-    )
-
-    payload = {
-        "model": "meta-llama/Meta-Llama-3-8B-Instruct:novita",
-        "messages": [{"role": "user", "content": prompt}],
-        "max_tokens": 128,
-        "temperature": 0.5
-    }
-
     try:
-        resp = requests.post(API_URL, headers=headers, json=payload, timeout=HF_TIMEOUT)
-        data = resp.json()
-        if resp.status_code != 200:
-            print("HF API error:", data)
-            return ""
-        return data["choices"][0]["message"]["content"].strip()
+        response = requests.post(
+            HF_RELAY_URL,
+            headers={"Content-Type": "application/json"},
+            json={"text": letters},
+            timeout=HF_TIMEOUT
+        )
+        response.raise_for_status()
+        data = response.json()
+        return data.get("result", "")
     except Exception as e:
-        print(f"HF API request failed: {e}")
+        print(f"HF Relay server request failed: {e}")
         return ""
-
 # ------------------- Hand landmarks processing -------------------
 def get_hand_landmarks(image):
     image_rgb = cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
