@@ -172,7 +172,7 @@ if __name__ == "__main__":
         plot_confusion_matrix(y_true_classes, y_pred_classes, class_names)
 
         model.save('v1exhaustiveroiasl_landmark_model.keras')
-        print("\nModel saved as 'roiasl_landmark_model.keras'")
+        print("\nModel saved as v1exhaustiveroiasl_landmark_model.keras")
         with open('class_names.txt', 'w') as f:
             for name in class_names:
                 f.write(f"{name}\n")
