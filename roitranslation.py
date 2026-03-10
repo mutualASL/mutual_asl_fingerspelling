@@ -222,14 +222,14 @@ def process_letter(prediction_history, current_time):
     if not prediction_history or len(prediction_history) < FRAMES_THRESHOLD:
         return None
 
-    most_common      = max(set(prediction_history), key=prediction_history.count)
+    most_common = max(set(prediction_history), key=prediction_history.count)
     confidence_ratio = prediction_history.count(most_common) / len(prediction_history)
-    unique_preds     = len(set(prediction_history))
-    is_chaotic       = confidence_ratio < 0.5 or (unique_preds / HISTORY_LENGTH > 0.5)
+    unique_preds = len(set(prediction_history))
+    is_chaotic = confidence_ratio < 0.5 or (unique_preds / HISTORY_LENGTH > 0.5)
 
     if confidence_ratio >= TOLERANCE_THRESHOLD and most_common in class_names:
         if not is_recording:
-            is_recording    = True
+            is_recording = True
             current_letters = []
 
         last_letter = current_letters[-1] if current_letters else None
@@ -308,9 +308,9 @@ class Pill:
 
     @property
     def settled(self):
-        return (abs(self.ty - self.y)                              < 0.6 and
-                abs(self.tx - self.x)                              < 0.6 and
-                abs((0.0 if self.exiting else 1.0) - self.scale)   < 0.02)
+        return (abs(self.ty - self.y) < 0.6 and
+                abs(self.tx - self.x) < 0.6 and
+                abs((0.0 if self.exiting else 1.0) - self.scale) < 0.02)
 
 
 class CapsuleLetterDisplay(tk.Canvas):
