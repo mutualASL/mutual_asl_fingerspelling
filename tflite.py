@@ -1,8 +1,5 @@
 # tflite.py
 # Run in tflite_env (TF 2.13):
-#   source ~/tflite_env/bin/activate
-#   cd /Users/steverinoma/PycharmProjects/mutual_intelligence
-#   python3 tflite.py
 
 import os
 import sys
