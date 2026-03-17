@@ -1,4 +1,5 @@
-# ASL Live Translation with Hugging Face Inference API + UI
+# ASL Live Translation — Mac version
+# Uses TFLite (via tensorflow package) + cv2.VideoCapture webcam
 
 import os
 import time
@@ -14,21 +15,32 @@ import requests
 import pygame
 import tkinter as tk
 from tkinter import font as tkfont
-from PIL import Image, ImageTk
+from PIL import Image, ImageTk, ImageDraw
 
 # ------------------- Configuration -------------------
 IMG_SIZE                = 200
 HISTORY_LENGTH          = 16
-FRAMES_THRESHOLD        = 4
+FRAMES_THRESHOLD        = 2
 CONFIDENCE_THRESHOLD    = 0.70
 TOLERANCE_THRESHOLD     = 0.50
 WORD_TIMEOUT            = 0.35
 SENTENCE_TIMEOUT        = 5.0
 CLEAR_TIMEOUT           = 9.0
-DOUBLE_LETTER_TIME      = 0.7
+DOUBLE_LETTER_TIME      = 1.2
 DOUBLE_LETTER_STABILITY = 0.92
+DOUBLE_LETTER_MAX       = 2.2
 HF_TIMEOUT              = 30
-CAPSULE_LINGER          = 2.0   # seconds pills linger after word clears
+CAPSULE_LINGER          = 2.0
+
+MOTION_LETTERS          = {'Z', 'J'}
+MOTION_FRAMES_THRESHOLD = 8
+MOTION_MIN_RATIO        = 0.65
+
+# Panel constants
+PANEL_W   = 340
+PANEL_H_RATIO = 0.91   # panel height = window_height * this ratio
+PANEL_PAD = 20         # gap from right edge when open
+PANEL_R   = 32
 
 # ------------------- Audio feedback -------------------
 pygame.mixer.init()
@@ -50,61 +62,24 @@ hands      = mp_hands.Hands(static_image_mode=False, max_num_hands=1,
                              min_detection_confidence=0.8)
 
 try:
-    model = tf.keras.models.load_model('v1exhaustiveroiasl_landmark_model.keras')
+    _interpreter = tf.lite.Interpreter(model_path='v1exhaustiveroiasl_landmark_model.tflite')
+    _interpreter.allocate_tensors()
+    _input_details  = _interpreter.get_input_details()
+    _output_details = _interpreter.get_output_details()
     with open('class_names.txt', 'r') as f:
         class_names = [line.strip() for line in f.readlines()]
-    print("Model and class names loaded. Classes:", class_names)
+    print("TFLite model and class names loaded. Classes:", class_names)
 except Exception as e:
     print(f"Error loading model: {e}")
     raise
 
-# ------------------- Startup Animation (commented out for testing) -------------------
-# def play_startup_animation(root, on_finish, video_filename="Startup copy.mp4", fade_frames=15):
-#     base_dir   = os.path.dirname(os.path.abspath(__file__))
-#     video_path = os.path.join(base_dir, video_filename)
-#     if not os.path.exists(video_path):
-#         on_finish(); return
-#     cap = cv2.VideoCapture(video_path)
-#     if not cap.isOpened():
-#         on_finish(); return
-#     fps = cap.get(cv2.CAP_PROP_FPS) or 60
-#     frame_delay = int(1000 / fps)
-#     orig_w = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
-#     orig_h = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
-#     root.deiconify(); root.update()
-#     ww, wh = 1200, 700
-#     ar = orig_w / orig_h
-#     if ww / wh > ar: dh, dw = wh, int(wh * ar)
-#     else:            dw, dh = ww, int(ww / ar)
-#     canvas = tk.Canvas(root, width=ww, height=wh, highlightthickness=0, bg='white')
-#     canvas.place(x=0, y=0, relwidth=1, relheight=1)
-#     img_c = canvas.create_image(ww//2, wh//2, anchor=tk.CENTER)
-#     frames = []
-#     while True:
-#         ret, frm = cap.read()
-#         if not ret: break
-#         frm = cv2.resize(frm, (dw, dh), interpolation=cv2.INTER_AREA)
-#         frames.append(Image.fromarray(cv2.cvtColor(frm, cv2.COLOR_BGR2RGB)))
-#     cap.release()
-#     if not frames: canvas.destroy(); on_finish(); return
-#     photos = [ImageTk.PhotoImage(f) for f in frames]
-#     canvas._refs = photos; canvas._frms = frames
-#     def show(i=0):
-#         if i < len(photos):
-#             canvas.itemconfig(img_c, image=photos[i])
-#             root.after(frame_delay, lambda: show(i+1))
-#         else: fade(0)
-#     def fade(s):
-#         if s >= fade_frames:
-#             def cleanup(): canvas.destroy(); canvas._refs=None; on_finish()
-#             root.after(50, cleanup); return
-#         a = s / fade_frames
-#         last = np.array(frames[-1]).astype(np.float32)
-#         blended = (last*(1-a) + np.ones_like(last)*255*a).astype(np.uint8)
-#         img = ImageTk.PhotoImage(Image.fromarray(blended))
-#         canvas.itemconfig(img_c, image=img); canvas._fade=img
-#         root.after(25, lambda: fade(s+1))
-#     show()
+def tflite_predict(processed_image):
+    _interpreter.set_tensor(_input_details[0]['index'], processed_image)
+    _interpreter.invoke()
+    return _interpreter.get_tensor(_output_details[0]['index'])
+
+# ------------------- Startup Animation (commented out) -------------------
+# def play_startup_animation(...): ...
 
 # ------------------- HF Relay -------------------
 HF_RELAY_URL = "https://hfrelay-production.up.railway.app/translate"
@@ -123,8 +98,8 @@ def query_hf_llm(letters: str) -> str:
         return ""
 
 # ------------------- Hand landmark processing -------------------
-def get_hand_landmarks(image):
-    rgb     = cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
+def get_hand_landmarks(image, already_rgb=False):
+    rgb     = image if already_rgb else cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
     results = hands.process(rgb)
     return results.multi_hand_landmarks[0] if results.multi_hand_landmarks else None
 
@@ -201,7 +176,27 @@ def preprocess_image(lm_img):
     resized = cv2.resize(gray, (IMG_SIZE, IMG_SIZE))
     return (resized.astype('float32') / 255.0).reshape(1, IMG_SIZE, IMG_SIZE, 1)
 
-# ------------------- Original sequence processing (restored exactly) -------------------
+def get_hand_crop_with_landmarks(frame_bgr, hand_landmarks, padding=50):
+    if hand_landmarks is None or frame_bgr is None:
+        return None
+    h, w = frame_bgr.shape[:2]
+    xs = [lm.x * w for lm in hand_landmarks.landmark]
+    ys = [lm.y * h for lm in hand_landmarks.landmark]
+    x1 = max(0, int(min(xs)) - padding)
+    x2 = min(w, int(max(xs)) + padding)
+    y1 = max(0, int(min(ys)) - padding)
+    y2 = min(h, int(max(ys)) + padding)
+    if x2 <= x1 or y2 <= y1:
+        return None
+    frame_copy = frame_bgr.copy()
+    mp_drawing.draw_landmarks(
+        frame_copy, hand_landmarks, mp_hands.HAND_CONNECTIONS,
+        mp_drawing.DrawingSpec(color=(0, 200, 80),  thickness=2, circle_radius=4),
+        mp_drawing.DrawingSpec(color=(255, 80,  0),  thickness=2)
+    )
+    return frame_copy[y1:y2, x1:x2]
+
+# ------------------- Sequence processing -------------------
 prediction_history  = deque(maxlen=HISTORY_LENGTH)
 current_letters     = []
 all_raw_letters     = []
@@ -211,25 +206,39 @@ last_letter_time    = None
 current_letter      = ""
 sentence_text       = ""
 
+_recent_letter_intervals = deque(maxlen=6)
+_last_commit_time        = None
+
+def _adaptive_double_time():
+    if len(_recent_letter_intervals) < 2:
+        return DOUBLE_LETTER_TIME
+    avg_interval = sum(_recent_letter_intervals) / len(_recent_letter_intervals)
+    adaptive = DOUBLE_LETTER_TIME + max(0.0, (0.4 - avg_interval) * 3.0)
+    return min(DOUBLE_LETTER_MAX, max(DOUBLE_LETTER_TIME, adaptive))
+
 def process_letter(prediction_history, current_time):
-    """
-    Original letter-commit logic restored verbatim.
-    Returns the newly committed letter string, or None if nothing committed.
-    """
     global current_letters, all_raw_letters, is_recording
     global last_confident_time, last_letter_time, current_letter
+    global _last_commit_time
 
     if not prediction_history or len(prediction_history) < FRAMES_THRESHOLD:
         return None
 
-    most_common = max(set(prediction_history), key=prediction_history.count)
+    most_common      = max(set(prediction_history), key=prediction_history.count)
     confidence_ratio = prediction_history.count(most_common) / len(prediction_history)
-    unique_preds = len(set(prediction_history))
-    is_chaotic = confidence_ratio < 0.5 or (unique_preds / HISTORY_LENGTH > 0.5)
+    unique_preds     = len(set(prediction_history))
+    is_chaotic       = confidence_ratio < 0.5 or (unique_preds / HISTORY_LENGTH > 0.5)
 
-    if confidence_ratio >= TOLERANCE_THRESHOLD and most_common in class_names:
+    is_motion   = most_common.upper() in MOTION_LETTERS
+    req_frames  = MOTION_FRAMES_THRESHOLD if is_motion else FRAMES_THRESHOLD
+    req_ratio   = MOTION_MIN_RATIO        if is_motion else TOLERANCE_THRESHOLD
+
+    if len(prediction_history) < req_frames:
+        return None
+
+    if confidence_ratio >= req_ratio and most_common in class_names:
         if not is_recording:
-            is_recording = True
+            is_recording    = True
             current_letters = []
 
         last_letter = current_letters[-1] if current_letters else None
@@ -237,24 +246,35 @@ def process_letter(prediction_history, current_time):
         if last_letter != most_common:
             current_letters.append(most_common)
             all_raw_letters.append(most_common)
-            current_letter   = most_common
-            last_letter_time = current_time
+            current_letter = most_common
+            if _last_commit_time is not None:
+                interval = current_time - _last_commit_time
+                if interval < 5.0:
+                    _recent_letter_intervals.append(interval)
+            _last_commit_time   = current_time
+            last_letter_time    = current_time
+            last_confident_time = current_time
             try: boop_sound.play()
             except: pass
-            last_confident_time = current_time
             return most_common
 
         else:
-            if last_letter_time and (current_time - last_letter_time >= DOUBLE_LETTER_TIME):
+            dynamic_threshold = _adaptive_double_time()
+            if last_letter_time and (current_time - last_letter_time >= dynamic_threshold):
                 stability = prediction_history.count(most_common) / len(prediction_history)
                 if not is_chaotic and stability >= DOUBLE_LETTER_STABILITY:
                     current_letters.append(most_common)
                     all_raw_letters.append(most_common)
-                    current_letter   = most_common
-                    last_letter_time = current_time
+                    current_letter = most_common
+                    if _last_commit_time is not None:
+                        interval = current_time - _last_commit_time
+                        if interval < 5.0:
+                            _recent_letter_intervals.append(interval)
+                    _last_commit_time   = current_time
+                    last_letter_time    = current_time
+                    last_confident_time = current_time
                     try: boop_sound.play()
                     except: pass
-                    last_confident_time = current_time
                     return most_common
 
         last_confident_time = current_time
@@ -269,11 +289,6 @@ def _spring(pos, vel, target, k, d):
 
 
 class Pill:
-    """
-    One committed letter pill.
-    Enters by springing in from above (scale 0→1, y above→0).
-    Exits by shrinking and dropping. Alpha always 1.0 while alive.
-    """
     W = 40
     H = 40
 
@@ -281,7 +296,7 @@ class Pill:
         self.letter  = letter
         self.tx      = float(tx)
         self.x       = float(tx)
-        self.y       = -float(self.H) * 1.8   # above capsule
+        self.y       = -float(self.H) * 1.8
         self.ty      = 0.0
         self.vx      = 0.0
         self.vy      = 0.0
@@ -308,18 +323,17 @@ class Pill:
 
     @property
     def settled(self):
-        return (abs(self.ty - self.y) < 0.6 and
-                abs(self.tx - self.x) < 0.6 and
+        return (abs(self.ty - self.y)                            < 0.6 and
+                abs(self.tx - self.x)                            < 0.6 and
                 abs((0.0 if self.exiting else 1.0) - self.scale) < 0.02)
 
 
 class CapsuleLetterDisplay(tk.Canvas):
-    PILL_W      = 40
-    PILL_H      = 40
-    GAP         = 6
-    PAD_X       = 14
-    MAX_VISIBLE = 14
-    CAP_H       = 60
+    PILL_W  = 40
+    PILL_H  = 40
+    GAP     = 6
+    PAD_X   = 14
+    CAP_H   = 76
 
     BG       = "#F2F2F2"
     OUTLINE  = "#CCCCCC"
@@ -328,24 +342,32 @@ class CapsuleLetterDisplay(tk.Canvas):
     T_NORM   = "#333333"
     T_LATEST = "#FFFFFF"
 
-    def __init__(self, parent, **kw):
-        self._letters = []
-        self._pills   = []
-        self._exiting = []
-        self._running = False
-        w = self._W()
+    def __init__(self, parent, max_visible=14, **kw):
+        self._letters    = []
+        self._pills      = []
+        self._exiting    = []
+        self._running    = False
+        self._max_visible = max_visible
+        w = self._W(max_visible)
         super().__init__(parent, width=w, height=self.CAP_H,
                          bg=parent["bg"], highlightthickness=0, **kw)
         self._redraw()
 
     # ── public ──────────────────────────────────────────────────────────────
 
-    def set_letters(self, letters: list):
-        new = list(letters)
-        if new == self._letters:
+    def set_max_visible(self, n):
+        """Change how many pills are visible. Excess letters scroll off left."""
+        if n == self._max_visible:
             return
+        self._max_visible = max(1, n)
+        # Resize canvas width
+        self.config(width=self._W(self._max_visible))
+        # Re-sync pills for the new visible window
+        self.set_letters(self._letters)
 
-        visible = new[-self.MAX_VISIBLE:]
+    def set_letters(self, letters: list):
+        new     = list(letters)
+        visible = new[-self._max_visible:]   # always show the LATEST n letters
 
         if not new:
             for p in self._pills:
@@ -353,7 +375,7 @@ class CapsuleLetterDisplay(tk.Canvas):
             self._exiting.extend(self._pills)
             self._pills = []
         else:
-            # retire pills that scrolled off the left
+            # Pills that no longer fit scroll off to the left (exit)
             drop = len(self._pills) - len(visible)
             if drop > 0:
                 for p in self._pills[:drop]:
@@ -361,11 +383,11 @@ class CapsuleLetterDisplay(tk.Canvas):
                 self._exiting.extend(self._pills[:drop])
                 self._pills = self._pills[drop:]
 
-            # slide remaining pills to their new x targets
+            # Re-target x for remaining pills (they may need to shift)
             for i, p in enumerate(self._pills):
                 p.tx = float(self._X(i))
 
-            # spawn new pills
+            # Spawn new pills for letters that appeared
             while len(self._pills) < len(visible):
                 idx = len(self._pills)
                 self._pills.append(Pill(visible[idx], self._X(idx)))
@@ -375,8 +397,8 @@ class CapsuleLetterDisplay(tk.Canvas):
 
     # ── internals ───────────────────────────────────────────────────────────
 
-    def _W(self):
-        return 2*self.PAD_X + self.MAX_VISIBLE*self.PILL_W + (self.MAX_VISIBLE-1)*self.GAP
+    def _W(self, n):
+        return 2*self.PAD_X + n*self.PILL_W + max(n-1, 0)*self.GAP
 
     def _X(self, i):
         return self.PAD_X + i * (self.PILL_W + self.GAP)
@@ -404,10 +426,12 @@ class CapsuleLetterDisplay(tk.Canvas):
 
     def _redraw(self):
         self.delete("all")
-        w, h = self._W(), self.CAP_H
-        cy   = h // 2
-        n    = len(self._pills)
+        w  = self._W(self._max_visible)
+        h  = self.CAP_H
+        cy = h // 2
+        n  = len(self._pills)
 
+        self.config(width=w)
         self._rrect(0, 4, w, h-4, 26, fill=self.BG, outline=self.OUTLINE, width=1)
 
         for i, pill in enumerate(self._pills):
@@ -435,10 +459,21 @@ class CapsuleLetterDisplay(tk.Canvas):
 
         self._rrect(cx-pw//2, cy2-ph//2, cx+pw//2, cy2+ph//2,
                     pr, fill=self._hex(fc), outline="")
+
         if s > 0.45:
             self.create_text(cx, cy2, text=pill.letter.upper(),
                              fill=self._hex(tc),
                              font=("Helvetica", max(9, int(15*s)), "bold"))
+
+        # "now" indicator under latest pill
+        if is_latest and s > 0.7:
+            dot_y   = cy2 + ph//2 + 6
+            dot_col = self._blend(self._rgb('#1A1A1A'), self._rgb(self.BG), a * 0.7)
+            lbl_col = self._blend(self._rgb('#888888'), self._rgb(self.BG), a * 0.8)
+            self.create_oval(cx-2, dot_y-2, cx+2, dot_y+2,
+                             fill=self._hex(dot_col), outline="")
+            self.create_text(cx, dot_y + 10, text="now",
+                             fill=self._hex(lbl_col), font=("Helvetica", 8))
 
     def _rrect(self, x1, y1, x2, y2, r, **kw):
         r   = max(1, r)
@@ -462,186 +497,357 @@ class CapsuleLetterDisplay(tk.Canvas):
 
 
 # ------------------- Logo Animation Player -------------------
-LOGO_NORMAL_FILE = "link_normal.mov"   # loops continuously
-LOGO_RECOG_FILE  = "link_recog.mov"    # plays once on query, then returns to normal
-LOGO_SIZE        = 140                 # diameter of the circle crop (px)
-LOGO_PAD         = 18                  # distance from top-left corner of window
-
+LOGO_NORMAL_FILE = "link_normal.mov"
+LOGO_RECOG_FILE  = "link_recog.mov"
+LOGO_SIZE        = 140
+LOGO_PAD         = 18
 
 class LogoPlayer:
-    """
-    Circular logo animation widget.
-    - Plays link_normal.mp4 on a seamless loop when idle.
-    - On trigger_recog(), plays link_recog.mp4 once, then resumes normal loop.
-    - Rendered as a circle-cropped Canvas placed absolutely in the top-left.
-    - Runs its own frame-tick via root.after so it never blocks the main loop.
-    """
-
     def __init__(self, root, size=LOGO_SIZE, pad=LOGO_PAD):
-        self.root   = root
-        self.size   = size
-        self.pad    = pad
-        self._mode  = 'normal'      # 'normal' | 'recog'
+        self.root       = root
+        self.size       = size
+        self.pad        = pad
+        self._mode      = 'normal'
         self._frame_idx = 0
-        self._job   = None
+        self._job       = None
         self._recog_pending = False
 
-        # Canvas placed absolutely over the window
         self.canvas = tk.Canvas(root, width=size, height=size,
-                                highlightthickness=0, bg='white',
-                                cursor='arrow')
+                                highlightthickness=0, bg='white', cursor='arrow')
         self.canvas.place(x=pad, y=pad)
-
-        # Create circle clip mask item (filled white outside)
         self._img_item = self.canvas.create_image(0, 0, anchor='nw')
 
-        # Pre-load both video sets as lists of circular PhotoImage frames
-        self._fps_normal,  pil_normal = self._load_video(LOGO_NORMAL_FILE)
-        self._fps_recog,   pil_recog  = self._load_video(LOGO_RECOG_FILE)
-
-        # Convert PIL → PhotoImage and keep hard references (prevents GC)
+        self._fps_normal, pil_normal = self._load_video(LOGO_NORMAL_FILE)
+        self._fps_recog,  pil_recog  = self._load_video(LOGO_RECOG_FILE)
+        # Keep PIL frames for rescaling, PhotoImages for display
+        self._pil_normal = pil_normal
+        self._pil_recog  = pil_recog
         self._frames_normal = [ImageTk.PhotoImage(f) for f in pil_normal]
         self._frames_recog  = [ImageTk.PhotoImage(f) for f in pil_recog]
+        self._scaled_cache  = {}   # (list_id, idx, size) → PhotoImage
 
         if not self._frames_normal:
             print(f"Warning: could not load {LOGO_NORMAL_FILE} — logo disabled")
             self.canvas.place_forget()
             return
-
         self._start_normal()
 
-    # ── public ──────────────────────────────────────────────────────────────
-
     def trigger_recog(self):
-        """Call when an LLM query fires — switches to recog animation."""
         if not self._frames_recog:
             return
         self._recog_pending = True
         if self._mode == 'normal':
             self._start_recog()
 
+    def set_size(self, new_size):
+        """Resize the logo canvas smoothly without reloading all frames."""
+        new_size = max(40, int(new_size))
+        if abs(new_size - self.size) < 2:
+            return
+        self.size = new_size
+        self.canvas.config(width=new_size, height=new_size)
+        # Invalidate cached scaled frames so they rebuild at new size
+        self._scaled_cache = {}
+
+    def _get_frame(self, pil_frames, idx):
+        """Return a PhotoImage for the given frame index, scaled to current size."""
+        key = (id(pil_frames), idx, self.size)
+        if key not in self._scaled_cache:
+            pil = pil_frames[idx % len(pil_frames)]
+            if pil.size[0] != self.size:
+                pil = pil.resize((self.size, self.size), Image.LANCZOS)
+            self._scaled_cache[key] = ImageTk.PhotoImage(pil)
+        return self._scaled_cache[key]
+
     def destroy(self):
         if self._job:
             self.root.after_cancel(self._job)
         self.canvas.destroy()
 
-    # ── internals ───────────────────────────────────────────────────────────
-
     def _start_normal(self):
-        self._mode      = 'normal'
-        self._frame_idx = 0
-        self._tick()
+        self._mode = 'normal'; self._frame_idx = 0; self._tick()
 
     def _start_recog(self):
-        self._mode           = 'recog'
-        self._frame_idx      = 0
-        self._recog_pending  = False
-        self._tick()
+        self._mode = 'recog'; self._frame_idx = 0; self._recog_pending = False; self._tick()
 
     def _tick(self):
-        if self._mode == 'normal':
-            frames = self._frames_normal
-            fps    = self._fps_normal
-        else:
-            frames = self._frames_recog
-            fps    = self._fps_recog
-
-        if not frames:
+        pil_frames = self._pil_normal if self._mode == 'normal' else self._pil_recog
+        fps        = self._fps_normal if self._mode == 'normal' else self._fps_recog
+        if not pil_frames:
             return
-
         delay = max(16, int(1000 / fps))
-
-        # Show current frame
-        frame = frames[self._frame_idx % len(frames)]
-        self.canvas.itemconfig(self._img_item, image=frame)
-
+        idx   = self._frame_idx % len(pil_frames)
+        photo = self._get_frame(pil_frames, idx)
+        self.canvas.itemconfig(self._img_item, image=photo)
         self._frame_idx += 1
-
         if self._mode == 'normal':
-            # Seamless loop
-            self._frame_idx = self._frame_idx % len(frames)
+            self._frame_idx = self._frame_idx % len(pil_frames)
             self._job = self.root.after(delay, self._tick)
-
-        else:  # recog
-            if self._frame_idx >= len(frames):
-                # Recog clip finished → back to normal
+        else:
+            if self._frame_idx >= len(pil_frames):
                 self._start_normal()
             else:
                 self._job = self.root.after(delay, self._tick)
 
     def _load_video(self, filename):
-        """
-        Load all frames from a video file, square-crop and circle-mask them.
-        Returns (fps, [PIL.Image, ...]) or (30, []) on failure.
-        Stores PIL Images — PhotoImage conversion happens in _tick to keep
-        references alive and avoid garbage collection issues.
-        """
         base = os.path.dirname(os.path.abspath(__file__))
         path = os.path.join(base, filename)
         if not os.path.exists(path):
-            print(f"Logo: file not found — {path}")
-            return 30, []
-
+            print(f"Logo: file not found — {path}"); return 30, []
         cap = cv2.VideoCapture(path)
         if not cap.isOpened():
-            print(f"Logo: cannot open — {path}")
-            return 30, []
-
-        # Read FPS directly here while cap is open
+            print(f"Logo: cannot open — {path}"); return 30, []
         fps = cap.get(cv2.CAP_PROP_FPS)
-        if not fps or fps <= 0 or fps > 240:
-            fps = 30
+        if not fps or fps <= 0 or fps > 240: fps = 30
         fps = float(fps)
-
         size = self.size
-
-        # Build circular alpha mask once
-        from PIL import ImageDraw
         mask = Image.new('L', (size, size), 0)
-        ImageDraw.Draw(mask).ellipse((0, 0, size - 1, size - 1), fill=255)
-
+        ImageDraw.Draw(mask).ellipse((0, 0, size-1, size-1), fill=255)
         pil_frames = []
         while True:
             ret, frame = cap.read()
-            if not ret:
-                break
+            if not ret: break
             fh, fw = frame.shape[:2]
-            # Square-crop from center
             side = min(fh, fw)
-            y0 = (fh - side) // 2
-            x0 = (fw - side) // 2
+            y0 = (fh-side)//2; x0 = (fw-side)//2
             frame = frame[y0:y0+side, x0:x0+side]
             frame = cv2.resize(frame, (size, size), interpolation=cv2.INTER_AREA)
             frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
-
             pil = Image.fromarray(frame).convert('RGBA')
             pil.putalpha(mask)
-            bg = Image.new('RGBA', (size, size), (255, 255, 255, 255))
-            bg.paste(pil, (0, 0), pil)
+            bg = Image.new('RGBA', (size, size), (255,255,255,255))
+            bg.paste(pil, (0,0), pil)
             pil_frames.append(bg.convert('RGB'))
-
         cap.release()
         print(f"Logo: loaded {len(pil_frames)} frames from {filename} @ {fps:.1f} fps")
         return fps, pil_frames
 
 
+# ------------------- Hand View Panel -------------------
+class HandViewPanel:
+    """
+    Rounded panel overlaying the window from the right edge.
+    Position and size update whenever the window resizes.
+    """
+    def __init__(self, root):
+        self.root        = root
+        self._visible    = False
+        self._anim       = None
+        self._photo_crop = None
+        self._photo_lm   = None
+        self._win_w      = 1200
+        self._win_h      = 700
+
+        self._canvas = tk.Canvas(root, width=PANEL_W, height=700,
+                                 bg='white', highlightthickness=0)
+        # Hidden off right edge initially
+        self._canvas.place(x=1200, y=0)
+
+        self._draw_bg(700)
+
+        PAD = 14
+        self._frame = tk.Frame(self._canvas, bg='#F5F5F5')
+        self._frame_win = self._canvas.create_window(
+            PANEL_W//2, 700//2,
+            window=self._frame,
+            width=PANEL_W - PAD*2,
+            height=700 - PAD*2)
+        self._frame.pack_propagate(False)
+
+        tk.Label(self._frame, text="Hand View", bg='#F5F5F5', fg='#444444',
+                 font=tkfont.Font(family="Helvetica", size=13, weight="bold")
+                 ).pack(pady=(14, 6))
+
+        self.crop_label = tk.Label(self._frame, bg='#E0E0E0')
+        self.crop_label.pack(padx=10, pady=(0, 4), fill=tk.X)
+
+        tk.Label(self._frame, text="camera crop", bg='#F5F5F5', fg='#BBBBBB',
+                 font=tkfont.Font(family="Helvetica", size=9)).pack()
+
+        tk.Frame(self._frame, bg='#DDDDDD', height=1).pack(fill=tk.X, padx=14, pady=6)
+
+        self.lm_label = tk.Label(self._frame, bg='#EBEBEB')
+        self.lm_label.pack(padx=10, pady=(0, 4), fill=tk.X)
+
+        tk.Label(self._frame, text="rotation-adjusted landmarks",
+                 bg='#F5F5F5', fg='#BBBBBB',
+                 font=tkfont.Font(family="Helvetica", size=9)).pack()
+
+    def on_resize(self, win_w, win_h):
+        """Called whenever window resizes. Repositions panel accordingly."""
+        self._win_w = win_w
+        self._win_h = win_h
+        panel_h = int(win_h * PANEL_H_RATIO)
+        panel_y = (win_h - panel_h) // 2
+
+        self._canvas.config(width=PANEL_W, height=panel_h)
+        self._draw_bg(panel_h)
+        PAD = 14
+        self._canvas.coords(self._frame_win, PANEL_W//2, panel_h//2)
+        self._canvas.itemconfig(self._frame_win,
+                                width=PANEL_W - PAD*2,
+                                height=panel_h - PAD*2)
+
+        if self._visible:
+            panel_x = win_w - PANEL_W - PANEL_PAD
+            self._canvas.place(x=panel_x, y=panel_y)
+        else:
+            self._canvas.place(x=win_w, y=panel_y)   # keep off-screen to the right
+
+    def _draw_bg(self, h):
+        self._canvas.delete("bg")
+        w, r = PANEL_W, PANEL_R
+        for i, shade in enumerate(['#E0E0E0', '#D8D8D8', '#CECECE']):
+            self._rrect(i+2, i+2, w-2+i, h-2+i, r, fill=shade, outline='', tag='bg')
+        self._rrect(0, 0, w-6, h-6, r, fill='#F6F6F6', outline='#E2E2E2', width=1, tag='bg')
+
+    def _rrect(self, x1, y1, x2, y2, r, tag='', **kw):
+        pts = [x1+r,y1, x2-r,y1, x2,y1, x2,y1+r,
+               x2,y2-r, x2,y2, x2-r,y2, x1+r,y2,
+               x1,y2, x1,y2-r, x1,y1+r, x1,y1]
+        return self._canvas.create_polygon(pts, smooth=True, tags=tag, **kw)
+
+    def show(self):
+        if self._visible: return
+        self._visible = True
+        win_h   = self._win_h
+        panel_h = int(win_h * PANEL_H_RATIO)
+        panel_y = (win_h - panel_h) // 2
+        self._animate(start=self._win_w, end=self._win_w - PANEL_W - PANEL_PAD,
+                      panel_y=panel_y)
+
+    def hide(self):
+        if not self._visible: return
+        self._visible = False
+        win_h   = self._win_h
+        panel_h = int(win_h * PANEL_H_RATIO)
+        panel_y = (win_h - panel_h) // 2
+        self._animate(start=self._win_w - PANEL_W - PANEL_PAD, end=self._win_w,
+                      panel_y=panel_y)
+
+    def update(self, crop_bgr, landmark_bgr):
+        if not self._visible: return
+        dw = PANEL_W - 60
+        if crop_bgr is not None and crop_bgr.size > 0:
+            try:
+                rgb    = cv2.cvtColor(crop_bgr, cv2.COLOR_BGR2RGB)
+                pil    = Image.fromarray(rgb)
+                ch, cw = crop_bgr.shape[:2]
+                asp    = ch / max(cw, 1)
+                nw     = dw
+                nh     = min(int(nw * asp), 180)
+                nw     = int(nh / asp) if nh == 180 else nw
+                pil    = pil.resize((nw, nh), Image.LANCZOS)
+                self._photo_crop = ImageTk.PhotoImage(pil)
+                self.crop_label.config(image=self._photo_crop, width=nw, height=nh)
+            except Exception: pass
+
+        if landmark_bgr is not None:
+            try:
+                rgb  = cv2.cvtColor(landmark_bgr, cv2.COLOR_BGR2RGB)
+                lm_s = PANEL_W - 80
+                pil  = Image.fromarray(rgb).resize((lm_s, lm_s), Image.LANCZOS)
+                self._photo_lm = ImageTk.PhotoImage(pil)
+                self.lm_label.config(image=self._photo_lm, width=lm_s, height=lm_s)
+            except Exception: pass
+
+    @property
+    def visible(self): return self._visible
+
+    def _animate(self, start, end, panel_y, steps=12):
+        if self._anim: self.root.after_cancel(self._anim)
+        def _tick(i):
+            t = i / steps
+            t = 1 - (1 - t) ** 3
+            x = int(start + (end - start) * t)
+            self._canvas.place(x=x, y=panel_y)
+            if i < steps:
+                self._anim = self.root.after(14, lambda: _tick(i+1))
+            else:
+                self._anim = None
+        _tick(0)
+
+
+# ------------------- Circular Hand Toggle Button -------------------
+class CircularHandButton(tk.Canvas):
+    SIZE = 54
+    PAD  = 16
+
+    def __init__(self, root, on_toggle):
+        super().__init__(root, width=self.SIZE, height=self.SIZE,
+                         bg='white', highlightthickness=0, cursor='hand2')
+        self._on_toggle = on_toggle
+        self._active    = False
+        self._hovered   = False
+        self._pressed   = False
+        self._win_w     = 1200
+        self._reposition(1200)
+        self._draw()
+        self.bind('<ButtonPress-1>',   self._press)
+        self.bind('<ButtonRelease-1>', self._release)
+        self.bind('<Enter>',  lambda e: self._set_hover(True))
+        self.bind('<Leave>',  lambda e: (self._set_hover(False),
+                                          setattr(self, '_pressed', False),
+                                          self._draw()))
+
+    def on_resize(self, win_w, win_h):
+        self._win_w = win_w
+        self._reposition(win_w)
+
+    def _reposition(self, win_w):
+        self.place(x=win_w - self.SIZE - self.PAD, y=self.PAD)
+
+    def _draw(self):
+        self.delete("all")
+        s = self.SIZE
+        if self._pressed:
+            bg, ol, fg = '#CCCCCC', '#AAAAAA', '#222222'
+        elif self._active:
+            bg, ol, fg = '#1A1A1A', '#1A1A1A', '#FFFFFF'
+        elif self._hovered:
+            bg, ol, fg = '#F0F0F0', '#CCCCCC', '#222222'
+        else:
+            bg, ol, fg = '#FFFFFF', '#DDDDDD', '#333333'
+        self.create_oval(2, 2, s-2, s-2, fill=bg, outline=ol, width=1.5)
+        self.create_text(s//2, s//2, text="✋", font=("Helvetica", 22), fill=fg)
+
+    def _press(self, _):
+        self._pressed = True; self._draw()
+
+    def _release(self, _):
+        self._pressed = False
+        self._active  = not self._active
+        self._draw()
+        self._on_toggle(self._active)
+
+    def _set_hover(self, val):
+        self._hovered = val; self._draw()
+
+
 # ------------------- UI -------------------
 class ASLTranslationUI:
-    # Green glow: bright flash → decay back to black
-    _GLOW = ["#00EE55","#00DD44","#00CC3A","#00AA2D",
-             "#008820","#006616","#00440F","#000000"]
-    _GLOW_MS = 30   # ms per step
+    _GLOW    = ["#00EE55","#00DD44","#00CC3A","#00AA2D",
+                "#008820","#006616","#00440F","#000000"]
+    _GLOW_MS = 30
+    PILL_W   = 40
+    PILL_GAP = 6
+    PILL_PAD = 14
 
     def __init__(self, root):
-        self.root = root
+        self.root        = root
         self.root.title("ASL Live Translation")
         self.root.geometry("1200x700")
+        self.root.resizable(True, True)
         self.root.configure(bg='white')
+        self._panel_open  = False
+        self._win_w       = 1200
+        self._win_h       = 700
+        self._shift_job   = None
+        self._cur_shift   = 0    # current right-padding applied to content
 
         self.top_frame = tk.Frame(root, bg='white')
         self.top_frame.pack(fill=tk.BOTH, expand=True)
 
-        # Translated word
         self.word_label = tk.Label(
             self.top_frame, text="", bg='white', fg='black',
             font=tkfont.Font(family="Helvetica", size=48, weight="bold"),
@@ -649,32 +855,27 @@ class ASLTranslationUI:
         )
         self.word_label.pack(pady=(50, 4))
 
-        # Big live letter
-        lf = tk.Frame(self.top_frame, bg='white')
-        lf.pack(pady=(0, 2))
+        self._lf = tk.Frame(self.top_frame, bg='white')
+        self._lf.pack(pady=(0, 2))
 
         self.big_letter = tk.Label(
-            lf, text="", bg='white', fg='black',
+            self._lf, text="", bg='white', fg='black',
             font=tkfont.Font(family="Helvetica", size=80, weight="bold"),
             width=2, anchor='center'
         )
         self.big_letter.pack()
 
-        # Small "confirmed" subtitle
         self.confirmed_label = tk.Label(
-            lf, text="", bg='white', fg='#999999',
-            font=tkfont.Font(family="Helvetica", size=13),
-            anchor='center'
+            self._lf, text="", bg='white', fg='#999999',
+            font=tkfont.Font(family="Helvetica", size=13), anchor='center'
         )
         self.confirmed_label.pack()
 
-        # Capsule
-        cf = tk.Frame(self.top_frame, bg='white')
-        cf.pack(pady=8)
-        self.capsule = CapsuleLetterDisplay(cf)
+        self._cf = tk.Frame(self.top_frame, bg='white')
+        self._cf.pack(pady=(8, 2))
+        self.capsule = CapsuleLetterDisplay(self._cf, max_visible=14)
         self.capsule.pack()
 
-        # Grey sentence bar
         self.bottom_frame = tk.Frame(root, bg='#808080', height=180)
         self.bottom_frame.pack(fill=tk.BOTH, expand=True)
         self.bottom_frame.pack_propagate(False)
@@ -690,11 +891,88 @@ class ASLTranslationUI:
         self._prev_conf = ""
         self._glow_job  = None
 
-        # Logo animation (placed absolutely, top-left)
-        self.logo = LogoPlayer(root)
+        self.logo       = LogoPlayer(root)
+        self.hand_panel = HandViewPanel(root)
+        self.hand_btn   = CircularHandButton(root, self.toggle_panel)
+
+        root.bind('<Configure>', self._on_configure)
 
         self.running = True
         self.root.protocol("WM_DELETE_WINDOW", self.on_closing)
+
+    # ── Resize handler ────────────────────────────────────────────────────────
+
+    def _on_configure(self, event):
+        if event.widget != self.root:
+            return
+        w, h = event.width, event.height
+        if w == self._win_w and h == self._win_h:
+            return
+        self._win_w = w
+        self._win_h = h
+        self._relayout(w, h, self._cur_shift)
+
+    def _relayout(self, w, h, shift):
+        """Recalculate all proportional layout for new window size + current shift."""
+        avail = max(200, w - shift)
+
+        wl = int(avail * 0.62)
+        self.word_label.config(wraplength=wl)
+        self.sentence_label.config(wraplength=wl)
+
+        max_pills = max(1, (avail - 2*self.PILL_PAD + self.PILL_GAP) //
+                           (self.PILL_W + self.PILL_GAP))
+        max_pills = min(max_pills, 14)
+        self.capsule.set_max_visible(max_pills)
+
+        self.hand_btn.on_resize(w, h)
+        self.hand_panel.on_resize(w, h)
+
+    # ── Shift animation ───────────────────────────────────────────────────────
+
+    def _animate_shift(self, target, steps=14):
+        """Smoothly push content left (positive target) or restore (0)."""
+        if self._shift_job:
+            self.root.after_cancel(self._shift_job)
+        start = self._cur_shift
+
+        def _tick(i):
+            t   = i / steps
+            t   = 1 - (1 - t) ** 3           # ease-out cubic
+            pad = int(start + (target - start) * t)
+            self._cur_shift = pad
+            # Apply right padding to all content elements → pushes them left
+            self.word_label.pack_configure(padx=(0, pad))
+            self._lf.pack_configure(padx=(0, pad))
+            self._cf.pack_configure(padx=(0, pad))
+            self.sentence_label.pack_configure(padx=(20, max(20, pad)))
+            # Recalculate wraplength and capsule width for this shift amount
+            self._relayout(self._win_w, self._win_h, pad)
+            # Scale logo proportionally
+            logo_size = max(60, int(LOGO_SIZE * (1.0 - 0.35 * (pad / (PANEL_W + PANEL_PAD*2)))))
+            self.logo.set_size(logo_size)
+            if i < steps:
+                self._shift_job = self.root.after(14, lambda: _tick(i + 1))
+            else:
+                self._shift_job = None
+        _tick(0)
+
+    # ── Panel toggle ─────────────────────────────────────────────────────────
+
+    def toggle_panel(self, open_panel: bool):
+        self._panel_open = open_panel
+        if open_panel:
+            self.hand_panel.show()
+            self._animate_shift(PANEL_W + PANEL_PAD * 2)
+        else:
+            self.hand_panel.hide()
+            self._animate_shift(0)
+
+    # ── Hand panel update ────────────────────────────────────────────────────
+
+    def update_hand_panel(self, crop_bgr, landmark_bgr):
+        if self._panel_open:
+            self.hand_panel.update(crop_bgr, landmark_bgr)
 
     # ── Green glow ───────────────────────────────────────────────────────────
 
@@ -715,21 +993,16 @@ class ASLTranslationUI:
 
     def update_display(self, last_word, last_letter, full_sentence,
                        raw_letters_list, new_letter_confirmed=False):
-
         self.word_label.config(text=last_word)
         self.sentence_label.config(text=full_sentence)
 
-        # Big letter tracks current_letter (last confirmed)
         if last_letter != self._prev_big:
             self._prev_big = last_letter
-            self.big_letter.config(
-                text=last_letter.upper() if last_letter else "")
+            self.big_letter.config(text=last_letter.upper() if last_letter else "")
 
-        # Glow fires exactly when a new letter is confirmed this frame
         if new_letter_confirmed:
             self._trigger_glow()
 
-        # Small subtitle
         conf = f"confirmed: {last_letter.upper()}" if last_letter else ""
         if conf != self._prev_conf:
             self._prev_conf = conf
@@ -738,7 +1011,6 @@ class ASLTranslationUI:
         self.capsule.set_letters(raw_letters_list)
 
     def trigger_recog(self):
-        """Fire the recog logo animation when an LLM query is sent."""
         self.logo.trigger_recog()
 
     def on_closing(self):
@@ -759,10 +1031,6 @@ def main():
     last_word            = ""
     current_landmark_img = None
 
-    # Startup animation skipped for testing — uncomment to re-enable:
-    # play_startup_animation(root, on_finish=start_main_app,
-    #                        video_filename="Startup copy.mp4")
-
     root.deiconify()
     root.attributes('-topmost', False)
 
@@ -776,7 +1044,7 @@ def main():
         nonlocal last_word, current_landmark_img
 
         if not ui.running:
-            if cap: cap.release()
+            cap.release()
             cv2.destroyAllWindows()
             pygame.mixer.quit()
             return
@@ -794,10 +1062,14 @@ def main():
         current_time         = time.time()
         new_confirmed        = False
 
+        if ui._panel_open:
+            hand_crop = get_hand_crop_with_landmarks(frame, hand_landmarks)
+            ui.update_hand_panel(hand_crop, current_landmark_img)
+
         if landmark_image is not None:
             processed = preprocess_image(landmark_image)
             if processed is not None:
-                pred       = model.predict(processed, verbose=0)
+                pred       = tflite_predict(processed)
                 pred_idx   = int(np.argmax(pred))
                 confidence = float(np.max(pred))
                 if confidence > CONFIDENCE_THRESHOLD:
@@ -807,12 +1079,10 @@ def main():
         else:
             prediction_history.clear()
 
-        # ── Original letter-commit logic ──────────────────────────────────────
         committed = process_letter(prediction_history, current_time)
         if committed:
             new_confirmed = True
 
-        # ── Word timeout ──────────────────────────────────────────────────────
         if last_confident_time and (current_time - last_confident_time > WORD_TIMEOUT):
             if is_recording:
                 is_recording = False
@@ -830,15 +1100,12 @@ def main():
                             last_word     = result.split()[-1] if result.split() else ""
                             print("LLM →", sentence_text)
                     threading.Thread(target=qt, daemon=True).start()
-                    # let pills linger before clearing
                     def _clear():
                         global all_raw_letters, current_letters
-                        all_raw_letters.clear()
-                        current_letters.clear()
+                        all_raw_letters.clear(); current_letters.clear()
                     root.after(int(CAPSULE_LINGER * 1000), _clear)
                 last_letter_time = None
 
-        # ── Sentence timeout ──────────────────────────────────────────────────
         if last_confident_time and (current_time - last_confident_time > SENTENCE_TIMEOUT):
             combined = ''.join(all_raw_letters)
             if combined:
@@ -854,44 +1121,26 @@ def main():
                         last_word     = result.split()[-1] if result.split() else ""
                         print("LLM (sentence) →", sentence_text)
                 threading.Thread(target=qts, daemon=True).start()
-                all_raw_letters.clear()
-                current_letters.clear()
+                all_raw_letters.clear(); current_letters.clear()
 
-        # ── Full clear ────────────────────────────────────────────────────────
         if last_confident_time and (current_time - last_confident_time > CLEAR_TIMEOUT):
-            all_raw_letters.clear()
-            current_letters.clear()
-            sentence_text       = ""
-            current_letter      = ""
-            last_word           = ""
-            is_recording        = False
-            last_confident_time = None
+            all_raw_letters.clear(); current_letters.clear()
+            sentence_text = ""; current_letter = ""; last_word = ""
+            is_recording = False; last_confident_time = None
             prediction_history.clear()
             print("State cleared (inactivity)")
 
         ui.update_display(
-            last_word,
-            current_letter,
-            sentence_text,
-            list(all_raw_letters),
-            new_letter_confirmed=new_confirmed
+            last_word, current_letter, sentence_text,
+            list(all_raw_letters), new_letter_confirmed=new_confirmed
         )
-
-        # Landmark debug window
-        disp = current_landmark_img if current_landmark_img is not None \
-               else np.ones((500, 500, 3), dtype=np.uint8) * 255
-        cv2.imshow('Landmark Image (Rotation Adjusted)',
-                   cv2.resize(disp, (500, 500), interpolation=cv2.INTER_NEAREST))
-        if cv2.waitKey(1) & 0xFF == ord('q'):
-            ui.on_closing()
-            return
 
         root.after(10, update_frame)
 
     update_frame()
     root.mainloop()
 
-    if cap: cap.release()
+    cap.release()
     cv2.destroyAllWindows()
     pygame.mixer.quit()
 
