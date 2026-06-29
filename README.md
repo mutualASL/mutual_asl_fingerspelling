@@ -5,7 +5,7 @@ Our most recent updates and packages, including **piroitranslation.py**, **asl_s
 
 ## Methodology
 ### 1. Data Collection and Preprocessing:
-1a. We built our own image collector that captures fingerspelling hand poses as rendered skeleton images. Each capture features Mediapipe's 21 hand landmarks and fits them into a dynamic bounding box that motion tracks the hand. The samples are collected with auto rotation adjustments so the hand is otherwise upright or horizontal. Landmark connections are drawn on a 200x200 black-and-white canvas. The design of the pipeline attempts to mitigate lighting and background information by concentrating only on the Mediapipe hand landmark skeleton. These ASL hand pose images are collected into separate folders, each corresponding to an English alphabet letter. 
+a. We built our own image collector that captures fingerspelling hand poses as rendered skeleton images. Each capture features Mediapipe's 21 hand landmarks and fits them into a dynamic bounding box that motion tracks the hand. The samples are collected with auto rotation adjustments so the hand is otherwise upright or horizontal. Landmark connections are drawn on a 200x200 black-and-white canvas. The design of the pipeline attempts to mitigate lighting and background information by concentrating only on the Mediapipe hand landmark skeleton. These ASL hand pose images are collected into separate folders, each corresponding to an English alphabet letter. 
 
 <table align="center">
   <tr>
@@ -22,10 +22,10 @@ Our most recent updates and packages, including **piroitranslation.py**, **asl_s
   </tr>
 </table>
 
-1b. With the integrated auto rotation adjustment logic that "standardizes" hand positions, camera-hand tracking, dynamic bounding box defined by hand landmarks, and skeleton rendering, the model can focus on learning handshape and tackling angle variations. These processing functions are also applied during live translation, allowing our compact VGG-style CNN to better handle unpredictable hand angles and positions. 
+b. With the integrated auto rotation adjustment logic that "standardizes" hand positions, camera-hand tracking, dynamic bounding box defined by hand landmarks, and skeleton rendering, the model can focus on learning handshape and tackling angle variations. These processing functions are also applied during live translation, allowing our compact VGG-style CNN to better handle unpredictable hand angles and positions. 
 
 ### 2. Model Training: 
-2. Our model training has undergone many iterations. Currently, the classifier is a convolutional neural network that takes the 200x200 black-and-white skeleton canvas and outputs a probability over the 26 letters of the English alphabet. The body is three convolutional blocks — each one Conv2D → BatchNorm → MaxPool → Dropout, doubling the filters as it goes (16 → 32 → 64) — followed by a flatten, a dense layer, and the 26-way softmax output. BatchNorm and dropout throughout keep it from overfitting the training captures.
+a. Our model training has undergone many iterations. Currently, the classifier is a convolutional neural network that takes the 200x200 black-and-white skeleton canvas and outputs a probability over the 26 letters of the English alphabet. The body is three convolutional blocks — each one Conv2D → BatchNorm → MaxPool → Dropout, doubling the filters as it goes (16 → 32 → 64) — followed by a flatten, a dense layer, and the 26-way softmax output. BatchNorm and dropout throughout keep it from overfitting the training captures.
 
 About 2.59M trainable parameters. The saved .keras weighs ~30 MB because it stores optimizer state; the weights themselves are ~10 MB, and we strip the rest for Pi deployment.
 
